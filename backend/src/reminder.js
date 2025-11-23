@@ -7,10 +7,11 @@ const admin = require("firebase-admin");
 const nodemailer = require("nodemailer");
 const africastalking = require("africastalking");
 
-// Firebase Init
+// Firebase Init (Correct path for Render secret files)
 admin.initializeApp({
-  credential: admin.credential.cert(require("./serviceAccountKey.json")),
+  credential: admin.credential.cert("/etc/secrets/serviceAccountKey.json"),
 });
+
 const db = admin.firestore();
 
 // ENV
