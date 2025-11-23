@@ -1,24 +1,52 @@
 /**
  * REMINDER ENGINE (Triggered manually via /run-reminders)
+ * VERBOSE LOGGING VERSION
  */
 
 require("dotenv").config();
+const fs = require("fs");
 const admin = require("firebase-admin");
 const nodemailer = require("nodemailer");
 const africastalking = require("africastalking");
 
-// Firebase Init (Correct path for Render secret files)
+/* ---------------------------------------
+   FIREBASE INITIALIZATION (RENDER SAFE)
+----------------------------------------- */
+
+// Read the Firebase secret file from Render Secret Files
+let serviceAccount;
+try {
+  serviceAccount = JSON.parse(
+    fs.readFileSync("/etc/secrets/serviceAccountKey.json", "utf8")
+  );
+  console.log("✔ Firebase service account loaded");
+} catch (err) {
+  console.error("❌ Failed to load Firebase key:", err);
+}
+
 admin.initializeApp({
-  credential: admin.credential.cert("/etc/secrets/serviceAccountKey.json"),
+  credential: admin.credential.cert(serviceAccount),
 });
 
 const db = admin.firestore();
 
-// ENV
+/* ---------------------------------------
+   ENVIRONMENT VARIABLES
+----------------------------------------- */
+
 const AT_USERNAME = process.env.AT_USERNAME;
 const AT_APIKEY = process.env.AT_APIKEY;
 const GMAIL_USER = process.env.GMAIL_USER;
 const GMAIL_PASS = process.env.GMAIL_PASS;
+
+console.log("🔐 Secrets loaded: ", {
+  africasTalkingUser: AT_USERNAME ? "OK" : "MISSING",
+  gmailUser: GMAIL_USER ? "OK" : "MISSING",
+});
+
+/* ---------------------------------------
+   CLIENT INITIALIZATION
+----------------------------------------- */
 
 // SMS client
 const smsClient = africastalking({
@@ -35,26 +63,26 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-/* --------------------------
+/* ---------------------------------------
    MESSAGE GENERATORS
---------------------------- */
+----------------------------------------- */
 
-// BILINGUAL SMS (simple, low-literacy)
+// SMS for low-literacy users
 function smsMessage(child, vaccine, dueDate, type) {
   if (type === "2days") {
     return `
-EN: Reminder: ${child} needs ${vaccine} in 2 days (${dueDate}). 
+EN: Reminder: ${child} needs ${vaccine} in 2 days (${dueDate}).
 SW: Kumbusho: ${child} atapokea ${vaccine} ndani ya siku 2 (${dueDate}).
-    `.trim();
+`.trim();
   }
 
   return `
-EN: Reminder: ${child} needs ${vaccine} TODAY (${dueDate}). 
+EN: Reminder: ${child} needs ${vaccine} TODAY (${dueDate}).
 SW: Kumbusho: ${child} anahitaji ${vaccine} LEO (${dueDate}).
-  `.trim();
+`.trim();
 }
 
-// BILINGUAL EMAIL (rich HTML)
+// Bilingual professional email
 function emailMessage(child, vaccine, dueDate, type) {
   if (type === "2days") {
     return `
@@ -63,7 +91,7 @@ function emailMessage(child, vaccine, dueDate, type) {
 
 <h3>Kiswahili</h3>
 <p><strong>${child}</strong> anapaswa kupata chanjo ya <strong>${vaccine}</strong> ndani ya siku 2 (${dueDate}).</p>
-    `.trim();
+`.trim();
   }
 
   return `
@@ -71,61 +99,88 @@ function emailMessage(child, vaccine, dueDate, type) {
 <p><strong>${child}</strong> is scheduled for <strong>${vaccine}</strong> TODAY (${dueDate}).</p>
 
 <h3>Kiswahili</h3>
-<p><strong>${child}</strong> anapaswa kupokea <strong>${vaccine}</strong> LEO (${dueDate}).</p>
-  `.trim();
+<p><strong>${child}</strong> anapaswa kupokea chanjo ya <strong>${vaccine}</strong> LEO (${dueDate}).</p>
+`.trim();
 }
 
-/* --------------------------
-     MAIN REMINDER PROCESS
---------------------------- */
+
+/* ---------------------------------------
+   MAIN REMINDER ENGINE WITH VERBOSE LOGS
+----------------------------------------- */
 
 async function runNow() {
-  console.log("⏳ Running vaccine reminder job…");
-
+  console.log("🚀 Starting REMINDER ENGINE (Verbose Mode)...");
   let notificationsSent = 0;
+
   const childrenSnap = await db.collection("children").get();
+  console.log(`📌 Found ${childrenSnap.size} children in database`);
 
   for (const childDoc of childrenSnap.docs) {
     const child = { id: childDoc.id, ...childDoc.data() };
+
+    console.log(`\n👶 Checking child: ${child.childName} (ID: ${child.id})`);
 
     const scheduleSnap = await db
       .collection(`children/${child.id}/schedule`)
       .get();
 
+    if (scheduleSnap.empty) {
+      console.log("⚠️ No vaccines scheduled — skipping child.");
+      continue;
+    }
+
     for (const vaccineDoc of scheduleSnap.docs) {
       const vaccine = vaccineDoc.data();
 
-      if (!vaccine.dueDate) continue;
-      if (vaccine.status === "Given") continue;
+      console.log(`   ➤ Vaccine: ${vaccine.vaccine}`);
+
+      if (!vaccine.dueDate) {
+        console.log("     ⏭️ Skipped: No due date.");
+        continue;
+      }
+
+      if (vaccine.status === "Given") {
+        console.log("     ⏭️ Skipped: Already marked as GIVEN.");
+        continue;
+      }
 
       const dueDate = new Date(vaccine.dueDate);
       const today = new Date();
 
-      const diffDays = Math.floor((dueDate - today) / (1000 * 60 * 60 * 24));
+      const diffDays = Math.floor(
+        (dueDate - today) / (1000 * 60 * 60 * 24)
+      );
 
-      // Only send reminders at diff = 2 or 0
-      if (diffDays !== 2 && diffDays !== 0) continue;
+      console.log(`     📅 Due in: ${diffDays} days`);
+
+      if (diffDays !== 2 && diffDays !== 0) {
+        console.log("     ⏭️ Not time for reminder — SKIPPED.");
+        continue;
+      }
 
       const type = diffDays === 2 ? "2days" : "today";
 
-      // SMS TEXT
-      const smsText = smsMessage(child.childName, vaccine.vaccine, vaccine.dueDate, type);
+      console.log(
+        `     ✅ Sending reminder (${type === "2days" ? "2 DAYS BEFORE" : "TODAY"})`
+      );
 
-      // EMAIL TEXT
+      const smsText = smsMessage(child.childName, vaccine.vaccine, vaccine.dueDate, type);
       const emailHTML = emailMessage(child.childName, vaccine.vaccine, vaccine.dueDate, type);
 
-      // Send SMS
+      /* ---- SEND SMS ---- */
       if (child.contact) {
         try {
           await smsClient.send({ to: child.contact, message: smsText });
-          console.log("📱 SMS sent to:", child.contact);
+          console.log(`     📱 SMS sent to: ${child.contact}`);
           notificationsSent++;
         } catch (err) {
-          console.error("❌ SMS failed:", err);
+          console.error("     ❌ SMS ERROR:", err);
         }
+      } else {
+        console.log("     ⚠️ No phone number available — SMS not sent.");
       }
 
-      // Send Email
+      /* ---- SEND EMAIL ---- */
       if (child.guardianEmail) {
         try {
           await transporter.sendMail({
@@ -134,16 +189,19 @@ async function runNow() {
             subject: `Vaccination Reminder for ${child.childName}`,
             html: emailHTML,
           });
-          console.log("📧 Email sent to:", child.guardianEmail);
+
+          console.log(`     📧 Email sent to: ${child.guardianEmail}`);
           notificationsSent++;
         } catch (err) {
-          console.error("❌ Email failed:", err);
+          console.error("     ❌ EMAIL ERROR:", err);
         }
+      } else {
+        console.log("     ⚠️ No email address available — Email not sent.");
       }
     }
   }
 
-  console.log(`🎉 Reminder job complete. Notifications sent: ${notificationsSent}`);
+  console.log(`\n🎉 REMINDER ENGINE COMPLETE — Total notifications sent: ${notificationsSent}`);
 }
 
 module.exports = { runNow };
